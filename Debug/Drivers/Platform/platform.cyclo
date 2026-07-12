@@ -1,0 +1,7 @@
+../Drivers/Platform/platform.c:17:9:VL53L4CD_RdDWord	2
+../Drivers/Platform/platform.c:30:9:VL53L4CD_RdWord	2
+../Drivers/Platform/platform.c:43:9:VL53L4CD_RdByte	2
+../Drivers/Platform/platform.c:58:9:VL53L4CD_WrByte	2
+../Drivers/Platform/platform.c:72:9:VL53L4CD_WrWord	2
+../Drivers/Platform/platform.c:87:9:VL53L4CD_WrDWord	2
+../Drivers/Platform/platform.c:100:9:VL53L4CD_WaitMs	1

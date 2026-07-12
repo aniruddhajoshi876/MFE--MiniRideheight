@@ -1,0 +1,11 @@
+../Core/Src/CANDriver.cpp:12:1:CANDriver::CANDriver(FDCAN_HandleTypeDef*, uint32_t, uint32_t)	2
+../Core/Src/CANDriver.cpp:20:10:static uint32_t CANDriver::dlcFromLen(uint8_t)	10
+../Core/Src/CANDriver.cpp:36:6:bool CANDriver::initialize()	5
+../Core/Src/CANDriver.cpp:71:6:bool CANDriver::configureTransmission()	1
+../Core/Src/CANDriver.cpp:88:6:bool CANDriver::addMessageToQueue(const CANMessage&)	2
+../Core/Src/CANDriver.cpp:100:6:bool CANDriver::transmitMessage()	1
+../Core/Src/CANDriver.cpp:131:6:bool CANDriver::transmitPriorityMessage()	1
+../Core/Src/CANDriver.cpp:136:6:bool CANDriver::isQueueFull() const	1
+../Core/Src/CANDriver.cpp:138:6:bool CANDriver::isQueueEmpty() const	1
+../Core/Src/CANDriver.cpp:140:5:int CANDriver::getQueueSize() const	1
+../Core/Src/CANDriver.cpp:142:6:bool CANDriver::checkACK()	15

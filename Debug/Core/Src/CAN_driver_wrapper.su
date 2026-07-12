@@ -1,0 +1,6 @@
+../Core/Src/CAN_driver_wrapper.cpp:15:7:void* CAN_create(FDCAN_HandleTypeDef*, uint32_t, uint32_t)	24	static
+../Core/Src/CAN_driver_wrapper.cpp:27:6:bool CAN_initialize(void*)	16	static
+../Core/Src/CAN_driver_wrapper.cpp:32:6:bool CAN_configureTransmission(void*)	16	static
+../Core/Src/CAN_driver_wrapper.cpp:37:6:bool CAN_addMessageToQueue(void*, uint32_t, const uint8_t*, uint8_t)	40	static
+../Core/Src/CAN_driver_wrapper.cpp:47:6:bool CAN_transmitMessage(void*)	16	static
+../Core/Src/CAN_driver_wrapper.cpp:52:6:bool CAN_checkACK(void*)	16	static

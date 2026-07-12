@@ -1,0 +1,6 @@
+../Core/Src/CANMessage.cpp:11:1:CANMessage::CANMessage()	1
+../Core/Src/CANMessage.cpp:14:1:CANMessage::CANMessage(uint32_t, const uint8_t*, uint8_t)	1
+../Core/Src/CANMessage.cpp:20:6:void CANMessage::setMessage(const uint8_t*, uint8_t)	2
+../Core/Src/CANMessage.cpp:26:10:uint8_t* CANMessage::getData()	1
+../Core/Src/CANMessage.cpp:29:10:uint32_t CANMessage::getID()	1
+../Core/Src/CANMessage.cpp:32:9:uint8_t CANMessage::getLength()	1

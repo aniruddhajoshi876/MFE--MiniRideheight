@@ -1,0 +1,4 @@
+../Core/Src/BoardManager.c:10:6:initializeCAN	8	static
+../Core/Src/BoardManager.c:20:6:push_on_bus	16	static
+../Core/Src/BoardManager.c:28:6:sensor_start	8	static
+../Core/Src/BoardManager.c:34:6:get_data_it	8	static
