@@ -73,7 +73,8 @@ I2C_CB = ct.CFUNCTYPE(ct.c_int32, ct.c_uint16, ct.c_uint16, ct.c_uint16,
 I2C_READY_CB = ct.CFUNCTYPE(ct.c_int32, ct.c_uint16, ct.c_uint32, ct.c_uint32)
 DELAY_CB = ct.CFUNCTYPE(None, ct.c_uint32)
 GPIO_INIT_CB = ct.CFUNCTYPE(None, ct.c_uint32, ct.c_uint32, ct.c_uint32, ct.c_uint32)
-FDCAN_ADD_CB = ct.CFUNCTYPE(ct.c_int32, ct.c_uint32, ct.c_uint32, ct.POINTER(ct.c_uint8))
+FDCAN_ADD_CB = ct.CFUNCTYPE(ct.c_int32, ct.c_uint32, ct.c_uint32, ct.c_uint32,
+                            ct.POINTER(ct.c_uint8))
 FDCAN_FILTER_CB = ct.CFUNCTYPE(ct.c_int32, ct.c_uint32, ct.c_uint32, ct.c_uint32,
                                ct.c_uint32, ct.c_uint32, ct.c_uint32)
 FDCAN_OP_CB = ct.CFUNCTYPE(ct.c_int32, ct.c_int32)
@@ -196,12 +197,13 @@ class Sil:
             except Exception as exc:
                 self.log.add("err", f"gpio model exception: {exc!r}")
 
-        def fdcan_add_cb(identifier, dlc_code, data):
+        def fdcan_add_cb(identifier, id_type, dlc_code, data):
             try:
                 from models import DLC_CODE_TO_BYTES
                 nbytes = DLC_CODE_TO_BYTES.get(dlc_code, 0)
                 payload = [data[i] for i in range(nbytes)] if data else []
-                return self.bus.add_to_tx_fifo(identifier, dlc_code, payload)
+                return self.bus.add_to_tx_fifo(identifier, dlc_code, payload,
+                                               id_type)
             except Exception as exc:
                 self.log.add("err", f"can model exception: {exc!r}")
                 return 1

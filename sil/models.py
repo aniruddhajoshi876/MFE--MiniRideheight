@@ -220,8 +220,23 @@ class VL53Model:
         if boot_forever:
             log.add("note", "scenario: sensor never leaves boot state "
                             "(FIRMWARE__SYSTEM_STATUS stays 0x02)")
-        self.accept_raw = accept_raw_devaddr or set()
+        requested_raw = set(accept_raw_devaddr or set())
+        # A raw DevAddress whose HAL interpretation (>>1) already matches the
+        # device's 7-bit address is acknowledged by the STRICT model, so
+        # accepting it additionally loosens nothing. Only genuinely
+        # behavior-altering addresses are registered as accommodations --
+        # otherwise PASS* (and --fail-on-accommodated) would report a model
+        # loosening that never existed.
+        redundant_raw = {a for a in requested_raw
+                         if ((a >> 1) & 0x7F) == self.DEVICE_7BIT}
+        self.accept_raw = requested_raw - redundant_raw
         self.accommodations: list[str] = []
+        if redundant_raw:
+            log.add("note",
+                    "requested raw-DevAddress accommodation(s) "
+                    f"{sorted(hex(a) for a in redundant_raw)} are redundant: "
+                    "the strict HAL interpretation (DevAddress>>1) already "
+                    "acknowledges them; NOT registered as accommodations")
         if self.accept_raw:
             note = ("SIL accommodation: sensor model additionally answers raw "
                     f"DevAddress argument(s) {sorted(hex(a) for a in self.accept_raw)} "
@@ -428,40 +443,52 @@ class VL53Model:
                         timeout_ms: int) -> int:
         """Model of HAL_I2C_IsDeviceReady: an address-only probe.
 
-        The device ACKs under exactly the same conditions as a register
-        transaction (present AND correctly-addressed). A present device
-        answers the first probe; an absent or mis-addressed one NACKs all
-        `trials` probes. Injected faults with op="ready" simulate a device
-        that is powered but not yet responsive.
+        Probes are simulated ONE TRIAL AT A TIME, like the real HAL retries
+        within a single call: each probe first consumes one armed op="ready"
+        fault (a device that is powered but not yet responsive), and an
+        un-faulted probe ACKs iff the device is present and correctly
+        addressed. So one injected failure with Trials>=2 NACKs probe 1 and
+        ACKs probe 2 -> HAL_OK. An absent or mis-addressed device NACKs all
+        trials regardless.
         """
         self.devaddr_args_seen.add(dev_addr)
         wire7 = (dev_addr >> 1) & 0x7F
-        for f in self.faults:
-            if f.op == "ready" and f.remaining != 0:
-                st = f.consume()
-                self.ready_probes += max(1, trials)
-                self.log.add("i2c", f"READY probe DevAddress=0x{dev_addr:02X} "
-                                    f"trials={trials} timeout={timeout_ms}ms "
-                                    f"-> injected fault, HAL status {st}")
-                return st
-        acknowledged = self.present and (
+        acknowledged_addr = self.present and (
             (wire7 == self.DEVICE_7BIT) or (dev_addr in self.accept_raw))
-        probes = 1 if acknowledged else max(1, trials)
+        head = (f"READY probe DevAddress=0x{dev_addr:02X} "
+                f"(wire 7-bit 0x{wire7:02X}) trials={trials} "
+                f"timeout={timeout_ms}ms")
+        probes = 0
+        injected = 0
+        last_status = HAL_ERROR
+        for _ in range(max(1, trials)):
+            probes += 1
+            fault = next((f for f in self.faults
+                          if f.op == "ready" and f.remaining != 0), None)
+            if fault is not None:
+                last_status = fault.consume()
+                injected += 1
+                continue
+            if acknowledged_addr:
+                self.ready_probes += probes
+                self.log.add("i2c", f"{head} -> ACK on probe {probes}" +
+                             (f" ({injected} injected readiness "
+                              f"failure(s) before it)" if injected else ""))
+                return HAL_OK
+            last_status = HAL_ERROR
         self.ready_probes += probes
-        if acknowledged:
-            self.log.add("i2c", f"READY probe DevAddress=0x{dev_addr:02X} "
-                                f"(wire 7-bit 0x{wire7:02X}) trials={trials} "
-                                f"timeout={timeout_ms}ms -> ACK on probe 1")
-            return HAL_OK
+        if injected and acknowledged_addr:
+            self.log.add("i2c", f"{head} -> injected readiness failures "
+                                f"consumed all {probes} probe(s), "
+                                f"HAL status {last_status}")
+            return last_status
         self.nacked_args.add(dev_addr)
-        self.nack_count += probes
+        self.nack_count += probes - injected
         reason = ("sensor physically absent" if not self.present
                   else f"device 7-bit is 0x{self.DEVICE_7BIT:02X}")
-        self.log.add("i2c", f"READY probe DevAddress=0x{dev_addr:02X} "
-                            f"(wire 7-bit 0x{wire7:02X}) trials={trials} "
-                            f"timeout={timeout_ms}ms -> NACK on all "
-                            f"{probes} probe(s) ({reason})")
-        return HAL_ERROR
+        self.log.add("i2c", f"{head} -> NACK on all {probes} probe(s) "
+                            f"({reason})")
+        return last_status
 
     def _write_side_effects(self, reg: int, data: list[int]) -> None:
         span = range(reg, reg + len(data))
@@ -566,7 +593,8 @@ class CanBusModel:
         self.log.add("can", f"{name} -> HAL status {st}")
         return st
 
-    def add_to_tx_fifo(self, identifier: int, dlc_code: int, payload: list[int]) -> int:
+    def add_to_tx_fifo(self, identifier: int, dlc_code: int,
+                       payload: list[int], id_type: int = 0) -> int:
         if self.inject_add_status is not None:
             st = self.inject_add_status
             self.inject_add_status = None
@@ -577,7 +605,9 @@ class CanBusModel:
         idx = self.put_index
         self.put_index = (self.put_index + 1) % self.NUM_TX_BUFFERS
         nbytes = DLC_CODE_TO_BYTES.get(dlc_code, 0)
-        frame = dict(identifier=identifier, dlc_code=dlc_code,
+        # id_type carries TxHeader.IdType verbatim:
+        # FDCAN_STANDARD_ID = 0x00000000, FDCAN_EXTENDED_ID = 0x40000000
+        frame = dict(identifier=identifier, id_type=id_type, dlc_code=dlc_code,
                      nbytes=nbytes, payload=payload[:nbytes], buffer=idx)
         buf = self.buffers[idx]
         buf.frame = frame

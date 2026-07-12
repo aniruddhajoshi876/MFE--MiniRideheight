@@ -161,6 +161,7 @@ HAL_StatusTypeDef HAL_FDCAN_AddMessageToTxFifoQ(FDCAN_HandleTypeDef *hfdcan,
     (void)hfdcan;
     if (s_fdcan_add_cb == 0) return HAL_ERROR;
     return (HAL_StatusTypeDef)s_fdcan_add_cb(pTxHeader->Identifier,
+                                             pTxHeader->IdType,
                                              pTxHeader->DataLength,
                                              pTxData);
 }

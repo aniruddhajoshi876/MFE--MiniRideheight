@@ -73,8 +73,11 @@ Each per-test JSON result preserves the ordinary functional `verdict`
 
 `PASS_ACCOMMODATED` is what the terminal renders as `PASS*`. A failed test
 remains `FAIL` even if it used an accommodation; `accommodated` still records
-the model mode. Runner-level JSON uses `schema_version: 2` and records the
-active policy and classification counts. Synthesized `ERROR`/`TIMEOUT`
+the model mode. Runner-level JSON uses `schema_version: 3` and records the
+active policy, classification counts, and an issue summary
+(`summary.failures` / `errors` / `timeouts` / `accommodated`, each entry
+carrying the failed checks' expected-vs-observed evidence and, for `PASS*`,
+the accommodation labels). Synthesized `ERROR`/`TIMEOUT`
 results use the same fields, but set `model_mode_known: false` and the
 `accommodated` / `strict_model` fields to `null`: no worker result exists from
 which to infer the model mode.

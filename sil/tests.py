@@ -82,7 +82,8 @@ def t_address_convention(rep: Report):
         st == 0,
         observed=(f"platform.c passed DevAddress=0x{DEVICE_INSTANCE:02X} to "
                   f"HAL_I2C_Mem_Read; the HAL drives wire 7-bit address "
-                  f"0x{wire7:02X} (DevAddress>>1); the device NACKed and the "
+                  f"0x{wire7:02X} (DevAddress>>1); the device "
+                  f"{'ACKed' if st == 0 else 'NACKed'} and the "
                   f"platform shim returned {st}"),
         expected=(f"a transaction the device acknowledges -- it answers wire "
                   f"7-bit 0x{dev7:02X}, i.e. HAL DevAddress form 0x{dev7 << 1:02X}"),
@@ -397,11 +398,19 @@ def t_device_ready_probe(rep: Report):
                        f"(wire 7-bit would be 0x{wrong >> 1:02X})",
               expected="nonzero -- only wire 7-bit "
                        f"0x{sil.sensor.DEVICE_7BIT:02X} answers")
+    sil.sensor.add_fault(reg=-1, op="ready", times=1)
+    st_transient = d.HAL_I2C_IsDeviceReady(None, hal_addr, 3, 100)
+    rep.check(
+        "one transient readiness failure recovers within a single call",
+        st_transient == 0,
+        observed=f"HAL status {st_transient} with 1 injected readiness "
+                 "failure and Trials=3",
+        expected="HAL_OK (0) -- probe 1 NACKs, probe 2 ACKs")
     rep.observe("probe accounting",
-                f"{sil.sensor.ready_probes} simulated probe(s) for the two "
-                "calls above",
-                note="an ACKed device answers the first probe; a NACKed "
-                     "call consumes every trial")
+                f"{sil.sensor.ready_probes} simulated probe(s) across the "
+                "three calls above",
+                note="an ACKed device answers the first un-faulted probe; "
+                     "a NACKed call consumes every trial")
 
 
 # ======================================================================
@@ -906,12 +915,17 @@ def t_dbc_ride_height_front(rep: Report):
                  "decoded mm == input mm (0x012C -> [2C 01], "
                  "0x1234 -> [34 12])")
     rep.check(
-        "identifier fits a standard 11-bit frame",
+        "frames are transmitted as standard 11-bit (FDCAN_STANDARD_ID)",
+        bool(sil.bus.delivered) and
+        all(f["id_type"] == 0 for f in sil.bus.delivered) and
         all(f["identifier"] < 0x800 for f in sil.bus.delivered),
-        observed=f"max identifier seen: "
-                 f"0x{max(f['identifier'] for f in sil.bus.delivered):03X}"
-                 if sil.bus.delivered else "no frames",
-        expected="< 0x800 (CANDriver configures FDCAN_STANDARD_ID)")
+        observed=(f"TxHeader.IdType values seen: "
+                  f"{sorted({f['id_type'] for f in sil.bus.delivered})}; "
+                  f"max identifier: "
+                  f"0x{max(f['identifier'] for f in sil.bus.delivered):03X}"
+                  if sil.bus.delivered else "no frames delivered"),
+        expected="IdType == FDCAN_STANDARD_ID (0x00000000) on every frame, "
+                 "identifier < 0x800")
     rep.observe(
         "DBC range vs. transmittable range",
         "the DBC bounds RideHeight_Front to [0|500] mm, but the uint16 "

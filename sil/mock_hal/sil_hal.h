@@ -220,8 +220,8 @@ typedef int32_t (*sil_i2c_ready_cb_t)(uint16_t dev_address, uint32_t trials,
 typedef void    (*sil_delay_cb_t)(uint32_t ms);
 typedef void    (*sil_gpio_init_cb_t)(uint32_t port_id, uint32_t pin,
                                       uint32_t mode, uint32_t pull);
-typedef int32_t (*sil_fdcan_add_cb_t)(uint32_t identifier, uint32_t dlc_code,
-                                      uint8_t *data);
+typedef int32_t (*sil_fdcan_add_cb_t)(uint32_t identifier, uint32_t id_type,
+                                      uint32_t dlc_code, uint8_t *data);
 typedef int32_t (*sil_fdcan_filter_cb_t)(uint32_t id_type, uint32_t filter_index,
                                          uint32_t filter_type, uint32_t filter_config,
                                          uint32_t filter_id1, uint32_t filter_id2);
