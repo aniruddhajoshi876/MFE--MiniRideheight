@@ -6,7 +6,8 @@ Verdicts:
   PASS    conformance check met
   FAIL    conformance mismatch (affects exit code)
   OBSERVE characterization only (exit-neutral)
-The parent runner adds ERROR (worker crash) and TIMEOUT (watchdog).
+The worker adds machine-readable accommodation metadata; the parent runner
+adds ERROR (worker crash) and TIMEOUT (watchdog).
 """
 
 from __future__ import annotations
@@ -22,10 +23,34 @@ DLL_PATH = os.path.join(SIL_DIR, "build", "minirideheight_sil.dll")
 
 MSYS_BIN_DIRS = [r"C:\msys64\ucrt64\bin", r"C:\msys64\mingw64\bin"]
 
-# Constants from the firmware (BoardManager.h) -- referenced, not redefined
-DEVICE_INSTANCE = 0x29
-FRONT_CAN_ID = 0x262
-GPIO_PIN_4 = 0x0010
+def _load_dll() -> ct.CDLL:
+    """Load the built host DLL, including its static MinGW dependencies."""
+    if not os.path.isfile(DLL_PATH):
+        raise RuntimeError(f"SIL DLL missing: {DLL_PATH}. Run: python sil/build.py")
+    try:
+        return ct.CDLL(DLL_PATH)
+    except OSError:
+        for directory in MSYS_BIN_DIRS:
+            if os.path.isdir(directory):
+                os.add_dll_directory(directory)
+        return ct.CDLL(DLL_PATH)
+
+
+def _compiled_u32(dll: ct.CDLL, symbol: str) -> int:
+    """Read a fixed-width constant exported by sil_probe.cpp."""
+    fn = getattr(dll, symbol)
+    fn.argtypes = []
+    fn.restype = ct.c_uint32
+    return int(fn())
+
+
+# These values come from the headers used to compile the current DLL.  They
+# are intentionally not duplicated as Python literals.
+_CONSTANT_PROBE_DLL = _load_dll()
+DEVICE_INSTANCE = _compiled_u32(_CONSTANT_PROBE_DLL, "sil_fw_device_instance")
+FRONT_CAN_ID = _compiled_u32(_CONSTANT_PROBE_DLL, "sil_fw_front_can_id")
+GPIO_PIN_4 = _compiled_u32(_CONSTANT_PROBE_DLL, "sil_fw_gpio_pin_4")
+PAYLOAD_LENGTH = _compiled_u32(_CONSTANT_PROBE_DLL, "sil_fw_payload_length")
 
 
 class VL53ResultsData(ct.Structure):
@@ -45,6 +70,7 @@ class VL53ResultsData(ct.Structure):
 # ---- callback C signatures (mirror sil_hal.h) ----
 I2C_CB = ct.CFUNCTYPE(ct.c_int32, ct.c_uint16, ct.c_uint16, ct.c_uint16,
                       ct.POINTER(ct.c_uint8), ct.c_uint16, ct.c_int32)
+I2C_READY_CB = ct.CFUNCTYPE(ct.c_int32, ct.c_uint16, ct.c_uint32, ct.c_uint32)
 DELAY_CB = ct.CFUNCTYPE(None, ct.c_uint32)
 GPIO_INIT_CB = ct.CFUNCTYPE(None, ct.c_uint32, ct.c_uint32, ct.c_uint32, ct.c_uint32)
 FDCAN_ADD_CB = ct.CFUNCTYPE(ct.c_int32, ct.c_uint32, ct.c_uint32, ct.POINTER(ct.c_uint8))
@@ -98,7 +124,8 @@ class Sil:
 
     def __init__(self, accept_raw_devaddr: set[int] | None = None,
                  exti_force_fire: bool = False,
-                 boot_forever: bool = False) -> None:
+                 boot_forever: bool = False,
+                 sensor_present: bool = True) -> None:
         global LAST_SIL
         LAST_SIL = self
         self.dll = self._load()
@@ -106,7 +133,8 @@ class Sil:
         self.clock = SimClock(self.log)
         self.sensor = VL53Model(self.clock, self.log,
                                 accept_raw_devaddr=accept_raw_devaddr,
-                                boot_forever=boot_forever)
+                                boot_forever=boot_forever,
+                                sensor_present=sensor_present)
         self.bus = CanBusModel(self.log)
         self.gpio = GpioExtiModel(self.log, force_fire=exti_force_fire)
         self.accommodations = list(self.sensor.accommodations) + \
@@ -114,6 +142,10 @@ class Sil:
 
         # wire the sensor's GPIO1 line to the EXTI decision, and EXTI to the DLL
         self.sensor.gpio1_listeners.append(self.gpio.on_gpio1_transition)
+        # the force-fire accommodation follows the sensor's programmed
+        # interrupt polarity: only the transition INTO the asserted level fires
+        self.gpio.asserted_level = \
+            lambda: 0 if self.sensor._active_low() else 1
         self.gpio.fire_exti = lambda pin: self.dll.HAL_GPIO_EXTI_Callback(
             ct.c_uint16(pin))
         # CAN model pushes TXBRP/TXBTO into the DLL-side registers
@@ -126,15 +158,7 @@ class Sil:
 
     # ------------------------------------------------------------------
     def _load(self) -> ct.CDLL:
-        if not os.path.isfile(DLL_PATH):
-            raise RuntimeError(f"SIL DLL missing: {DLL_PATH}. Run: python sil/build.py")
-        try:
-            return ct.CDLL(DLL_PATH)
-        except OSError:
-            for d in MSYS_BIN_DIRS:
-                if os.path.isdir(d):
-                    os.add_dll_directory(d)
-            return ct.CDLL(DLL_PATH)
+        return _load_dll()
 
     def _wire_callbacks(self) -> None:
         # keep refs on self: ctypes callbacks are garbage-collected otherwise
@@ -151,6 +175,13 @@ class Sil:
                 return st
             except Exception as exc:                     # loud, not silent
                 self.log.add("err", f"i2c model exception: {exc!r}")
+                return 1
+
+        def i2c_ready_cb(dev, trials, timeout_ms):
+            try:
+                return self.sensor.is_device_ready(dev, trials, timeout_ms)
+            except Exception as exc:                     # loud, not silent
+                self.log.add("err", f"i2c ready model exception: {exc!r}")
                 return 1
 
         def delay_cb(ms):
@@ -207,6 +238,7 @@ class Sil:
             FDCAN_ADD_CB(fdcan_add_cb), FDCAN_FILTER_CB(fdcan_filter_cb),
             FDCAN_OP_CB(fdcan_op_cb), FDCAN_PROTOCOL_CB(fdcan_protocol_cb),
             FDCAN_COUNTERS_CB(fdcan_counters_cb),
+            I2C_READY_CB(i2c_ready_cb),
         ]
         d = self.dll
         d.sil_set_i2c_cb(self._cbs[0])
@@ -217,6 +249,7 @@ class Sil:
         d.sil_set_fdcan_op_cb(self._cbs[5])
         d.sil_set_fdcan_protocol_cb(self._cbs[6])
         d.sil_set_fdcan_counters_cb(self._cbs[7])
+        d.sil_set_i2c_ready_cb(self._cbs[8])
 
     def _declare_prototypes(self) -> None:
         d = self.dll
@@ -259,12 +292,24 @@ class Sil:
         d.sensor_start.restype = ct.c_bool
         d.get_data_it.restype = None
         d.sil_main_step.restype = None
+        d.sil_main_start.argtypes = [u32]
+        d.sil_main_start.restype = ct.c_int32
+        d.sil_start_can_attempts.argtypes = []
+        d.sil_start_can_attempts.restype = u32
+        d.sil_start_sensor_attempts.argtypes = []
+        d.sil_start_sensor_attempts.restype = u32
         d.MX_GPIO_Init.restype = None
         d.sil_can_queue_size.argtypes = [ct.c_void_p]
         d.sil_can_queue_size.restype = ct.c_int
+        for name in ("sil_fw_device_instance", "sil_fw_front_can_id",
+                     "sil_fw_gpio_pin_4", "sil_fw_payload_length"):
+            getattr(d, name).argtypes = []
+            getattr(d, name).restype = u32
         d.sil_get_hfdcan1.restype = ct.c_void_p
         d.HAL_GPIO_EXTI_Callback.argtypes = [u16]
         d.HAL_GPIO_EXTI_Callback.restype = None
+        d.HAL_I2C_IsDeviceReady.argtypes = [ct.c_void_p, u16, u32, u32]
+        d.HAL_I2C_IsDeviceReady.restype = ct.c_int32
         d.sil_flush.restype = None
         d.sil_fdcan_set_regs.argtypes = [u32, u32]
         d.sil_fdcan_set_regs.restype = None

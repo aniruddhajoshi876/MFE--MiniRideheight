@@ -33,9 +33,18 @@ def main() -> int:
 
     result = {
         "id": test_id, "title": "", "verdict": "ERROR",
+        "effective_verdict": "ERROR", "accommodated": None,
+        "strict_model": None, "model_mode_known": False,
         "checks": [], "trace": [], "accommodations": [],
+        "trace_stats": {
+            "total_events": 0, "captured_events": 0,
+            "omitted_events": 0, "stored_lines": 0,
+            "collapsed_runs": 0, "repeated_events_collapsed": 0,
+            "truncated": False,
+        },
         "stdout": "", "error": "",
     }
+    model_mode_known = False
     try:
         from harness import Report
         import harness
@@ -56,8 +65,9 @@ def main() -> int:
             import harness
             last = getattr(harness, "LAST_SIL", None)
             if last is not None:
+                model_mode_known = True
                 last.dll.sil_flush()
-                result["trace"] = last.log.entries
+                result["trace"], result["trace_stats"] = last.log.export()
                 result["accommodations"] = last.accommodations
         except Exception:
             pass
@@ -71,6 +81,18 @@ def main() -> int:
             os.remove(capture_path)
         except OSError:
             pass
+
+    # Preserve the ordinary functional verdict while making the model mode
+    # and an accommodated success explicit to JSON/JUnit consumers.
+    result["model_mode_known"] = model_mode_known
+    result["accommodated"] = (bool(result["accommodations"])
+                              if model_mode_known else None)
+    result["strict_model"] = (not result["accommodated"]
+                              if model_mode_known else None)
+    if result["verdict"] == "PASS" and result["accommodated"] is True:
+        result["effective_verdict"] = "PASS_ACCOMMODATED"
+    else:
+        result["effective_verdict"] = result["verdict"]
 
     with open(out_path, "w") as f:
         json.dump(result, f, indent=1)

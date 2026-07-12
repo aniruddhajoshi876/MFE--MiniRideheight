@@ -86,8 +86,8 @@ all: main-build
 main-build: MFE--MiniRideheight.elf secondary-outputs
 
 # Tool invocations
-MFE--MiniRideheight.elf MFE--MiniRideheight.map: $(OBJS) $(USER_OBJS) C:\Users\aniru.000\STM32CubeIDE\workspace_1.19.0\MFE--MiniRideheight\STM32G491KCUX_FLASH.ld makefile objects.list $(OPTIONAL_TOOL_DEPS)
-	arm-none-eabi-g++ -o "MFE--MiniRideheight.elf" @"objects.list" $(USER_OBJS) $(LIBS) -mcpu=cortex-m4 -T"C:\Users\aniru.000\STM32CubeIDE\workspace_1.19.0\MFE--MiniRideheight\STM32G491KCUX_FLASH.ld" -Wl,-Map="MFE--MiniRideheight.map" -Wl,--gc-sections -static --specs=nano.specs -mfpu=fpv4-sp-d16 -mfloat-abi=hard -mthumb -Wl,--start-group -lc -lm -lstdc++ -lsupc++ -Wl,--end-group
+MFE--MiniRideheight.elf MFE--MiniRideheight.map: $(OBJS) $(USER_OBJS) C:\Users\aniru.000\OneDrive\ -\ McGill\ University\Desktop\mfe\MFE--MiniRideheight\STM32G491KCUX_FLASH.ld makefile objects.list $(OPTIONAL_TOOL_DEPS)
+	arm-none-eabi-g++ -o "MFE--MiniRideheight.elf" @"objects.list" $(USER_OBJS) $(LIBS) -mcpu=cortex-m4 -T"C:\Users\aniru.000\OneDrive - McGill University\Desktop\mfe\MFE--MiniRideheight\STM32G491KCUX_FLASH.ld" -Wl,-Map="MFE--MiniRideheight.map" -Wl,--gc-sections -static --specs=nano.specs -mfpu=fpv4-sp-d16 -mfloat-abi=hard -mthumb -Wl,--start-group -lc -lm -lstdc++ -lsupc++ -Wl,--end-group
 	@echo 'Finished building target: $@'
 	@echo ' '
 

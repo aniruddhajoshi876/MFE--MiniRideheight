@@ -106,18 +106,22 @@ int main(void)
   	  HAL_Delay(20);
   }
 
+  while (!sensor_start()){
+	  printf("Sensor not started"); //start the sensor
+	  HAL_Delay(20);
+  }
+  printf("Sensor started\r\n");
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-    /* USER CODE END WHILE */
 	  if (data_ready){
 		  data_ready = 0;
 		  get_data_it();
 	  }
-
+    /* USER CODE END WHILE */
     /* USER CODE BEGIN 3 */
   }
   /* USER CODE END 3 */

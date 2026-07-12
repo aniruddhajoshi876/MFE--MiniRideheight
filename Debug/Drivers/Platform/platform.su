@@ -1,7 +1,7 @@
 ../Drivers/Platform/platform.c:17:9:VL53L4CD_RdDWord	40	static
-../Drivers/Platform/platform.c:30:9:VL53L4CD_RdWord	40	static
-../Drivers/Platform/platform.c:43:9:VL53L4CD_RdByte	40	static
-../Drivers/Platform/platform.c:58:9:VL53L4CD_WrByte	40	static
-../Drivers/Platform/platform.c:72:9:VL53L4CD_WrWord	40	static
-../Drivers/Platform/platform.c:87:9:VL53L4CD_WrDWord	40	static
-../Drivers/Platform/platform.c:100:9:VL53L4CD_WaitMs	16	static
+../Drivers/Platform/platform.c:32:9:VL53L4CD_RdWord	40	static
+../Drivers/Platform/platform.c:47:9:VL53L4CD_RdByte	40	static
+../Drivers/Platform/platform.c:62:9:VL53L4CD_WrByte	40	static
+../Drivers/Platform/platform.c:76:9:VL53L4CD_WrWord	40	static
+../Drivers/Platform/platform.c:93:9:VL53L4CD_WrDWord	40	static
+../Drivers/Platform/platform.c:108:9:VL53L4CD_WaitMs	16	static

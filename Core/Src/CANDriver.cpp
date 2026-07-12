@@ -64,7 +64,7 @@ bool CANDriver::initialize() {
 	  {
 		return 0;
 	  }
-
+	  printf("fdcan initialized\r\n");
 	  return 1;
 }
 
@@ -98,10 +98,10 @@ bool CANDriver::addMessageToQueue(const CANMessage& message) {
 }
 
 bool CANDriver::transmitMessage() {
-//    if (isQueueEmpty()) {
-//    	printf("Queue is empty\r\n");
-//    	return false;
-//    }
+    if (isQueueEmpty()) {
+    	printf("Queue is empty\r\n");
+    	return false;
+    }
 
     CANMessage msg = canQueue[queueHeadIndex];
     queueHeadIndex = (queueHeadIndex + 1) % MAX_QUEUE_CAPACITY;
@@ -116,13 +116,10 @@ bool CANDriver::transmitMessage() {
     HAL_StatusTypeDef halStatus = HAL_FDCAN_AddMessageToTxFifoQ(canInstance, &TxHeader, msg.getData());
     printf("[CAN] HAL status: %d (0=OK,1=ERR,2=BUSY,3=TIMEOUT)\r\n", (int)halStatus);
 
-//    if (halStatus != HAL_OK){
-//        printf("[CAN] ErrorCode: 0x%08lX\r\n", canInstance->ErrorCode);
-//        printf("[CAN] FDCAN State: %d\r\n", (int)canInstance->State);
-//        printf("[CAN] TXFQS reg: 0x%08lX\r\n", canInstance->Instance->TXFQS);
-//    	printf("Not Pushed to bus\r\n");
-//        return false;
-//    }
+    if (halStatus != HAL_OK){
+    	printf("Transmission Error\r\n");
+        return false;
+    }
 
     printf("[CAN] Message queued to TX FIFO OK\r\n");
     return true;

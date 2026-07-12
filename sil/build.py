@@ -88,6 +88,10 @@ def needs_rebuild() -> bool:
         for h in ("sil_hal.h", "stm32g4xx_hal.h")
     ]
     watched.append(os.path.abspath(__file__))
+    # sil_probe.cpp exports these macros to Python.  A header-only constant
+    # change must therefore invalidate the DLL even when no .c/.cpp mtime
+    # changed.
+    watched.append(os.path.join(ROOT, "Core", "Inc", "BoardManager.h"))
     return any(os.path.getmtime(p) > dll_mtime for p in watched if os.path.isfile(p))
 
 

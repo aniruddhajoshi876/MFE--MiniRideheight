@@ -3,9 +3,9 @@
 ../Core/Src/CANDriver.cpp:36:6:bool CANDriver::initialize()	5
 ../Core/Src/CANDriver.cpp:71:6:bool CANDriver::configureTransmission()	1
 ../Core/Src/CANDriver.cpp:88:6:bool CANDriver::addMessageToQueue(const CANMessage&)	2
-../Core/Src/CANDriver.cpp:100:6:bool CANDriver::transmitMessage()	1
-../Core/Src/CANDriver.cpp:131:6:bool CANDriver::transmitPriorityMessage()	1
-../Core/Src/CANDriver.cpp:136:6:bool CANDriver::isQueueFull() const	1
-../Core/Src/CANDriver.cpp:138:6:bool CANDriver::isQueueEmpty() const	1
-../Core/Src/CANDriver.cpp:140:5:int CANDriver::getQueueSize() const	1
-../Core/Src/CANDriver.cpp:142:6:bool CANDriver::checkACK()	15
+../Core/Src/CANDriver.cpp:100:6:bool CANDriver::transmitMessage()	3
+../Core/Src/CANDriver.cpp:128:6:bool CANDriver::transmitPriorityMessage()	1
+../Core/Src/CANDriver.cpp:133:6:bool CANDriver::isQueueFull() const	1
+../Core/Src/CANDriver.cpp:135:6:bool CANDriver::isQueueEmpty() const	1
+../Core/Src/CANDriver.cpp:137:5:int CANDriver::getQueueSize() const	1
+../Core/Src/CANDriver.cpp:139:6:bool CANDriver::checkACK()	15

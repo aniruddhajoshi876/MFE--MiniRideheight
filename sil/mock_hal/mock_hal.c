@@ -19,6 +19,7 @@ FDCAN_HandleTypeDef hfdcan1 = { &sil_fdcan_regs, 0u, 0u };
 
 /* ---- registered callbacks ---- */
 static sil_i2c_cb_t             s_i2c_cb;
+static sil_i2c_ready_cb_t       s_i2c_ready_cb;
 static sil_delay_cb_t           s_delay_cb;
 static sil_gpio_init_cb_t       s_gpio_init_cb;
 static sil_fdcan_add_cb_t       s_fdcan_add_cb;
@@ -30,6 +31,7 @@ static sil_fdcan_counters_cb_t  s_fdcan_counters_cb;
 static uint32_t s_tick_ms;
 
 void sil_set_i2c_cb(sil_i2c_cb_t cb)                       { s_i2c_cb = cb; }
+void sil_set_i2c_ready_cb(sil_i2c_ready_cb_t cb)           { s_i2c_ready_cb = cb; }
 void sil_set_delay_cb(sil_delay_cb_t cb)                   { s_delay_cb = cb; }
 void sil_set_gpio_init_cb(sil_gpio_init_cb_t cb)           { s_gpio_init_cb = cb; }
 void sil_set_fdcan_add_cb(sil_fdcan_add_cb_t cb)           { s_fdcan_add_cb = cb; }
@@ -80,6 +82,14 @@ HAL_StatusTypeDef HAL_I2C_Mem_Write(I2C_HandleTypeDef *hi2c, uint16_t DevAddress
     if (s_i2c_cb == 0) return HAL_ERROR;
     return (HAL_StatusTypeDef)s_i2c_cb(DevAddress, MemAddress, MemAddSize,
                                        pData, Size, 1);
+}
+
+HAL_StatusTypeDef HAL_I2C_IsDeviceReady(I2C_HandleTypeDef *hi2c, uint16_t DevAddress,
+                                        uint32_t Trials, uint32_t Timeout)
+{
+    (void)hi2c;
+    if (s_i2c_ready_cb == 0) return HAL_ERROR;
+    return (HAL_StatusTypeDef)s_i2c_ready_cb(DevAddress, Trials, Timeout);
 }
 
 void MX_I2C2_Init(void) { /* peripheral clock/pin setup has no SIL meaning */ }

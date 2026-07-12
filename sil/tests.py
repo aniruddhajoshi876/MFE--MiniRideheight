@@ -17,7 +17,7 @@ from __future__ import annotations
 import ctypes as ct
 
 from harness import (Sil, Report, VL53ResultsData, DEVICE_INSTANCE,
-                     FRONT_CAN_ID, GPIO_PIN_4)
+                     FRONT_CAN_ID, GPIO_PIN_4, PAYLOAD_LENGTH)
 from models import (HAL_ERROR, HAL_TIMEOUT, reg_name,
                     REG_SYSTEM_START, REG_SYSTEM_INTERRUPT_CLEAR,
                     REG_INTERMEASUREMENT_MS, REG_RESULT_RANGE_STATUS,
@@ -46,6 +46,20 @@ def _wr_value(sil, reg) -> int | None:
         return None
     bytes_part = writes[-1].split("bytes=[")[1].rstrip("]")
     return int(bytes_part.split()[0], 16)
+
+
+def _captured_firmware_stdout(sil: Sil) -> str:
+    """Flush and read the worker-owned stdout capture file."""
+    import os
+    capture_path = os.environ.get("SIL_CAPTURE_PATH")
+    if not capture_path or not os.path.isfile(capture_path):
+        return ""
+    sil.dll.sil_flush()
+    try:
+        with open(capture_path, "r", errors="replace") as capture:
+            return capture.read()
+    except OSError:
+        return ""
 
 
 # ======================================================================
@@ -239,37 +253,50 @@ def t_byte_order_boundaries(rep: Report):
     SCRATCH = 0x0072      # THRESH_HIGH: harmless scratch register
     values = [0x0000, 0x0001, 0x00FF, 0x0100, 0x1234, 0x8000, 0xFFFF]
 
-    wr_bad, wr_lines = [], []
-    for v in values:
-        d.VL53L4CD_WrWord(DEVICE_INSTANCE, SCRATCH, v)
-        stored = sil.sensor.reg_bytes(SCRATCH, 2)
-        want = [(v >> 8) & 0xFF, v & 0xFF]
-        if stored != want:
-            wr_bad.append(v)
-            wr_lines.append(f"0x{v:04X} stored as [{stored[0]:02X} {stored[1]:02X}], "
-                            f"device convention is [{want[0]:02X} {want[1]:02X}]")
+    def check_wrword_boundaries() -> tuple[bool, str]:
+        wr_bad, wr_lines = [], []
+        for v in values:
+            d.VL53L4CD_WrWord(DEVICE_INSTANCE, SCRATCH, v)
+            stored = sil.sensor.reg_bytes(SCRATCH, 2)
+            want = [(v >> 8) & 0xFF, v & 0xFF]
+            if stored != want:
+                wr_bad.append(v)
+                wr_lines.append(
+                    f"0x{v:04X} stored as [{stored[0]:02X} {stored[1]:02X}], "
+                    f"device convention is [{want[0]:02X} {want[1]:02X}]")
+        observed = ((f"{len(wr_bad)}/{len(values)} values arrive byte-swapped: "
+                     + "; ".join(wr_lines)) if wr_bad
+                    else "all values stored MSB-first")
+        return not wr_bad, observed
+
+    wr_ok, wr_observed = check_wrword_boundaries()
     rep.check(
         "WrWord: device receives MSB-first for all boundary values",
-        not wr_bad,
-        observed=(f"{len(wr_bad)}/{len(values)} values arrive byte-swapped: "
-                  + "; ".join(wr_lines)) if wr_bad else "all values stored MSB-first",
+        wr_ok,
+        observed=wr_observed,
         expected="MSB first on the wire for every value (Table 8)",
         note="symmetric values (0x0000, 0xFFFF) cannot reveal a swap; "
              "the asymmetric ones can")
 
-    rd_bad, rd_lines = [], []
-    for v in values:
-        sil.sensor._store(SCRATCH, v, 2)      # ground truth, MSB-first
-        out = ct.c_uint16(0)
-        d.VL53L4CD_RdWord(DEVICE_INSTANCE, SCRATCH, ct.byref(out))
-        if out.value != v:
-            rd_bad.append(v)
-            rd_lines.append(f"wrote 0x{v:04X}, driver read back 0x{out.value:04X}")
+    def check_rdword_boundaries() -> tuple[bool, str]:
+        rd_bad, rd_lines = [], []
+        for v in values:
+            sil.sensor._store(SCRATCH, v, 2)      # ground truth, MSB-first
+            out = ct.c_uint16(0)
+            d.VL53L4CD_RdWord(DEVICE_INSTANCE, SCRATCH, ct.byref(out))
+            if out.value != v:
+                rd_bad.append(v)
+                rd_lines.append(
+                    f"wrote 0x{v:04X}, driver read back 0x{out.value:04X}")
+        observed = ((f"{len(rd_bad)}/{len(values)} values differ: "
+                     + "; ".join(rd_lines)) if rd_bad else "all values match")
+        return not rd_bad, observed
+
+    rd_ok, rd_observed = check_rdword_boundaries()
     rep.check(
         "RdWord: driver reconstructs the value the device holds",
-        not rd_bad,
-        observed=(f"{len(rd_bad)}/{len(values)} values differ: "
-                  + "; ".join(rd_lines)) if rd_bad else "all values match",
+        rd_ok,
+        observed=rd_observed,
         expected="read-back equals the device value for every boundary value")
 
     sil.sensor._store(0x00DE, 0x1234, 2)  # leave scratch; use calib reg pair
@@ -342,6 +369,39 @@ def t_command_writes(rep: Report):
     rep.check("StopRanging writes 0x80 to SYSTEM_START",
               v == 0x80, observed=f"wrote 0x{v:02X}" if v is not None else "none",
               expected="0x80")
+
+
+@sil_test("i2c.device_ready_probe",
+          "HAL_I2C_IsDeviceReady models presence and address convention")
+def t_device_ready_probe(rep: Report):
+    """Strict model of the HAL address-only readiness probe.
+
+    Nothing in the CURRENT firmware sources calls HAL_I2C_IsDeviceReady;
+    this contract exists so a readiness check can be tested the moment the
+    firmware gains one. (The old Debug/ listing contains such a call from
+    a previous build -- that artifact is not the source of truth.)
+    """
+    sil = Sil()
+    d = sil.dll
+    hal_addr = sil.sensor.DEVICE_7BIT << 1        # 0x52, real HAL form
+    st = d.HAL_I2C_IsDeviceReady(None, hal_addr, 3, 100)
+    rep.check("present sensor ACKs the correct HAL-form address",
+              st == 0,
+              observed=f"HAL status {st} at DevAddress=0x{hal_addr:02X}",
+              expected="HAL_OK (0)")
+    wrong = sil.sensor.DEVICE_7BIT                # 7-bit passed unshifted
+    st_wrong = d.HAL_I2C_IsDeviceReady(None, wrong, 3, 100)
+    rep.check("a wrong address convention is NACKed",
+              st_wrong != 0,
+              observed=f"HAL status {st_wrong} at DevAddress=0x{wrong:02X} "
+                       f"(wire 7-bit would be 0x{wrong >> 1:02X})",
+              expected="nonzero -- only wire 7-bit "
+                       f"0x{sil.sensor.DEVICE_7BIT:02X} answers")
+    rep.observe("probe accounting",
+                f"{sil.sensor.ready_probes} simulated probe(s) for the two "
+                "calls above",
+                note="an ACKed device answers the first probe; a NACKed "
+                     "call consumes every trial")
 
 
 # ======================================================================
@@ -424,10 +484,15 @@ def t_handshake_cycle(rep: Report):
     rep.check("sensor_start() succeeds", bool(d.sensor_start()),
               observed="returned False", expected="True")
 
+    fired_before_evt1 = sil.gpio.exti_fired
     sil.sensor.program_measurement(distance_mm=111)
     sil.sensor.complete_measurement()
     rep.check("event 1: data_ready set", sil.data_ready is True,
               observed=f"data_ready={sil.data_ready}", expected="True")
+    rep.check("event 1: the assertion produced exactly one EXTI callback",
+              sil.gpio.exti_fired - fired_before_evt1 == 1,
+              observed=f"{sil.gpio.exti_fired - fired_before_evt1} callback(s)",
+              expected="1")
 
     clears_before = len(sil.i2c_writes_to(REG_SYSTEM_INTERRUPT_CLEAR))
     reads_before = len(sil.i2c_reads_of(REG_RESULT_DISTANCE))
@@ -457,11 +522,21 @@ def t_handshake_cycle(rep: Report):
               observed=f"GPIO1 level = {sil.sensor.gpio1_level}",
               expected="idle level")
 
+    rep.check("the interrupt-clear release produced zero EXTI callbacks",
+              fired_during == 0,
+              observed=f"{fired_during} callback(s) during the loop iteration",
+              expected="0 -- releasing GPIO1 is not a data-ready event")
+
+    fired_before_evt2 = sil.gpio.exti_fired
     sil.sensor.program_measurement(distance_mm=222)
     sil.sensor.complete_measurement()
     rep.check("event 2 after re-arm: data_ready set again",
               sil.data_ready is True,
               observed=f"data_ready={sil.data_ready}", expected="True")
+    rep.check("event 2: exactly one new EXTI callback",
+              sil.gpio.exti_fired - fired_before_evt2 == 1,
+              observed=f"{sil.gpio.exti_fired - fired_before_evt2} callback(s)",
+              expected="1")
 
 
 @sil_test("irq.clear_semantics",
@@ -779,29 +854,112 @@ def t_can_ordering(rep: Report):
               observed=str(sil.dll.sil_can_queue_size(h)), expected="0")
 
 
+@sil_test("can.dbc_ride_height_front",
+          "front frame matches the DBC: ID 610 dec, DLC 2, LE uint16 mm")
+def t_dbc_ride_height_front(rep: Report):
+    """
+    DBC contract (MFE26_sensor.dbc, message RideHeight_Front_Data):
+    CAN ID 610 decimal (0x262), standard 11-bit identifier, DLC 2, one
+    signal `RideHeight_Front : 0|16@1+ (1,0) [0|500] "mm"` -- unsigned
+    little-endian 16-bit, 1 mm per bit, offset 0. Byte 0 is the LSB.
+    This test never touches the sensor, so the model is fully strict.
+    """
+    sil = Sil()
+    d = sil.dll
+    rep.check("initializeCAN() (prerequisite: sets can_handle)",
+              bool(d.initializeCAN()), observed="False", expected="True")
+
+    vectors = [0x0000, 0x0001, 0x012C, 0x1234, 0xFFFF]
+    mismatches: list[str] = []
+    for value in vectors:
+        before = len(sil.bus.delivered)
+        ok = d.push_on_bus(value)
+        if not ok or len(sil.bus.delivered) == before:
+            mismatches.append(f"0x{value:04X}: no frame delivered "
+                              f"(push_on_bus returned {bool(ok)})")
+            continue
+        frame = sil.bus.delivered[-1]
+        expect_bytes = [value & 0xFF, (value >> 8) & 0xFF]
+        got_bytes = frame["payload"][:2]
+        decoded = (got_bytes[0] | (got_bytes[1] << 8)) if len(got_bytes) == 2 \
+            else None
+        problems = []
+        if frame["identifier"] != FRONT_CAN_ID:
+            problems.append(f"id 0x{frame['identifier']:03X}")
+        if frame["nbytes"] != 2:
+            problems.append(f"DLC {frame['nbytes']}")
+        if got_bytes != expect_bytes:
+            problems.append(f"bytes {[f'{b:02X}' for b in got_bytes]} != "
+                            f"{[f'{b:02X}' for b in expect_bytes]}")
+        if decoded != value:
+            problems.append(f"decodes to {decoded}")
+        if problems:
+            mismatches.append(f"0x{value:04X}: " + ", ".join(problems))
+
+    rep.check(
+        "all 5 vectors are byte-exact against the DBC signal layout",
+        not mismatches,
+        observed=("every frame carried ID 0x262, DLC 2, and the LSB-first "
+                  "byte pair decoding back to the input value"
+                  if not mismatches else "; ".join(mismatches)),
+        expected="ID 610 dec (0x262), DLC 2, byte0=LSB byte1=MSB, "
+                 "decoded mm == input mm (0x012C -> [2C 01], "
+                 "0x1234 -> [34 12])")
+    rep.check(
+        "identifier fits a standard 11-bit frame",
+        all(f["identifier"] < 0x800 for f in sil.bus.delivered),
+        observed=f"max identifier seen: "
+                 f"0x{max(f['identifier'] for f in sil.bus.delivered):03X}"
+                 if sil.bus.delivered else "no frames",
+        expected="< 0x800 (CANDriver configures FDCAN_STANDARD_ID)")
+    rep.observe(
+        "DBC range vs. transmittable range",
+        "the DBC bounds RideHeight_Front to [0|500] mm, but the uint16 "
+        "payload (and a VL53L4CD reading) can carry up to 65535/1300 mm; "
+        "the firmware applies no clamp or suppression",
+        note="whether out-of-range values should be clamped, marked "
+             "invalid, suppressed, or the DBC widened is a system "
+             "requirement decision -- observed, not judged")
+    rep.observe(
+        "RL/RR message IDs",
+        f"BoardManager.h defines RL_CAN_ID=0x263 (611) and RR_CAN_ID=0x264 "
+        f"(612), matching the DBC's RideHeight_RL_Data/RideHeight_RR_Data, "
+        f"but no firmware path transmits them; only FRONT_CAN_ID is used",
+        note="per-corner transmission is not implemented in these sources")
+
+
 # ======================================================================
 # sys.* -- BoardManager integration / end-to-end
 # ======================================================================
 
-@sil_test("sys.startup_as_wired", "what the production startup actually does")
+@sil_test("sys.startup_characterization",
+          "OBSERVE: what the production startup actually does")
 def t_startup_as_wired(rep: Report):
-    sil = Sil(accept_raw_devaddr=ACCOMMODATED)
+    sil = Sil()
     d = sil.dll
     # main.c order: MX_GPIO_Init, MX_FDCAN1_Init, MX_I2C2_Init, MX_USART1,
-    # then the initializeCAN() retry loop. main.c/i2c.c/fdcan.c are not
-    # linked; MX_I2C2/FDCAN1 are SIL no-ops (models replace them).
+    # then the initializeCAN() retry loop, then the sensor_start() retry
+    # loop. main.c/i2c.c/fdcan.c are not linked; MX_I2C2/FDCAN1 are SIL
+    # no-ops (models replace them). sil_main_start() is the bounded mirror
+    # of the two retry loops.
     d.MX_GPIO_Init()                    # real (Core/Src/gpio.c)
-    ok = d.initializeCAN()              # real (Core/Src/BoardManager.c)
-    rep.check("initializeCAN() succeeds at startup", bool(ok),
-              observed=f"returned {bool(ok)}", expected="True")
+    status = d.sil_main_start(5)        # bounded mirror of main.c startup
+    rep.observe(
+        "bounded startup mirror result",
+        f"sil_main_start(5) returned {status} "
+        f"(0=OK, 1=CAN failed, 2=sensor failed); "
+        f"initializeCAN attempts: {d.sil_start_can_attempts()}, "
+        f"sensor_start attempts: {d.sil_start_sensor_attempts()}",
+        note="CAN bring-up requirements are judged separately by "
+             "can.bringup; this test only characterizes main.c wiring")
     rep.observe(
         "sensor state after the as-wired startup",
         f"ranging={sil.sensor.ranging}; "
         f"SYSTEM_START writes seen: {len(sil.i2c_writes_to(REG_SYSTEM_START))}; "
-        f"I2C transactions total: {len([e for e in sil.log.entries if ' i2c ' in e or e.split()[1] == 'i2c'])}",
-        note="main() calls initializeCAN() but nothing in main.c calls "
-             "sensor_start(); with the sensor never started, no measurement "
-             "ever completes and data_ready can never be raised by the sensor")
+        f"I2C transactions total: {sil.sensor.transactions}",
+        note="main() retries initializeCAN() and then sensor_start() until "
+             "each succeeds, so a successful startup leaves the sensor "
+             "ranging before the while(1) loop is entered")
     sil.clock.advance(100)
     rep.observe("after 100 sim-ms of main-loop time",
                 f"completions={sil.sensor.completions}, data_ready={sil.data_ready}")
@@ -869,8 +1027,9 @@ def t_push_on_bus(rep: Report):
         rep.check(
             "frame DLC matches the size of the value being sent",
             f["nbytes"] == 2,
-            observed=(f"push_on_bus passed length PAYLOAD_LENGTH=16 for a "
-                      f"2-byte uint16_t; the wrapper clamped 16 to 8; the "
+            observed=(f"push_on_bus passed length PAYLOAD_LENGTH={PAYLOAD_LENGTH} "
+                      f"for a 2-byte uint16_t; the wrapper clamped "
+                      f"{PAYLOAD_LENGTH} to 8; the "
                       f"emitted frame has DLC={f['nbytes']}. The source object "
                       f"holds 2 valid bytes, so {f['nbytes'] - 2} byte(s) were "
                       f"read from memory beyond it (observed values: "
@@ -921,9 +1080,9 @@ def t_e2e(rep: Report):
     rep.observe(
         "CAN bus during the loop iteration",
         f"{len(sil.bus.delivered) - frames_before} frame(s) emitted",
-        note="get_data_it() prints the distance but contains no call into the "
-             "CAN path; push_on_bus() exists in BoardManager.c and is tested "
-             "separately (sys.push_on_bus)")
+        note="get_data_it() calls push_on_bus() when range_status == 0, so a "
+             "valid measurement should emit exactly one frame here; the "
+             "frame contract itself is judged by sys.push_on_bus")
 
     # terminal output is asserted only when the worker's capture works;
     # otherwise it is dropped from the chain rather than silently passed.
@@ -987,20 +1146,35 @@ def t_fault_propagation(rep: Report):
           "STRICT end-to-end: firmware alone must move a measurement to CAN")
 def t_e2e_strict(rep: Report):
     """
-    Python performs ONLY what the outside world does: it lets the firmware
-    run its own startup (the calls main.c actually makes) and advances time.
-    No component is invoked on the firmware's behalf. The contract comes
-    from the firmware's own stated intent: get_data_it() carries the comment
-    '//send data along CAN', and BoardManager.h defines FRONT_CAN_ID for it.
+    main() is a non-returning superloop and is not linked, so this test runs
+    a BOUNDED MIRROR of the current startup path: sil_main_start() repeats
+    main.c's initializeCAN() and sensor_start() retry loops with a retry cap
+    (sys.startup_mirror_drift keeps that mirror honest against main.c).
+    After startup, Python only supplies a target and advances time -- it
+    never calls sensor_start(), get_data_it(), or push_on_bus() on the
+    firmware's behalf. The peripheral model itself is fully strict: no
+    raw-address or forced-EXTI accommodation.
     """
-    sil = Sil(accept_raw_devaddr=ACCOMMODATED, exti_force_fire=True)
+    sil = Sil()
     d = sil.dll
 
-    # -- the startup main.c actually performs (see main():99-108) --
+    rep.check("strict model has no SIL accommodations",
+              not sil.accommodations,
+              observed=f"accommodations={sil.accommodations}",
+              expected="[]")
+
+    # -- bounded mirror of the startup main.c actually performs --
     d.MX_GPIO_Init()                    # real gpio.c
-    started = d.initializeCAN()         # real BoardManager.c
-    rep.check("startup: initializeCAN()", bool(started),
-              observed=f"returned {bool(started)}", expected="True")
+    status = d.sil_main_start(5)        # initializeCAN + sensor_start loops
+    stage = {0: "OK", 1: "initializeCAN()", 2: "sensor_start()"}.get(
+        status, f"unknown ({status})")
+    rep.check(
+        "startup: bounded mirror of main.c's retry loops succeeds",
+        status == 0,
+        observed=(f"sil_main_start(5) -> {stage}; initializeCAN attempts: "
+                  f"{d.sil_start_can_attempts()}, sensor_start attempts: "
+                  f"{d.sil_start_sensor_attempts()}"),
+        expected="SIL_START_OK with the sensor left ranging")
 
     # -- the outside world: a target in front of the sensor + passing time --
     sil.sensor.program_measurement(distance_mm=180, user_status=0)
@@ -1009,22 +1183,40 @@ def t_e2e_strict(rep: Report):
         sil.clock.advance(1)
         d.sil_main_step()
 
-    chain = []
-    chain.append(("sensor began ranging", sil.sensor.ranging or
-                  sil.sensor.completions > 0,
-                  f"ranging={sil.sensor.ranging}, completions={sil.sensor.completions}, "
-                  f"SYSTEM_START ranging writes={sum(1 for e in sil.i2c_writes_to(REG_SYSTEM_START) if ('21' in e.split('bytes=[')[-1] or '40' in e.split('bytes=[')[-1]))}"))
-    chain.append(("a measurement completed", sil.sensor.completions > 0,
-                  f"completions={sil.sensor.completions}"))
-    chain.append(("data_ready was raised", sil.data_ready or
-                  len(sil.i2c_reads_of(REG_RESULT_DISTANCE)) > 0,
-                  f"data_ready={sil.data_ready}"))
-    chain.append(("the loop read the result",
-                  len(sil.i2c_reads_of(REG_RESULT_DISTANCE)) > 0,
-                  f"distance reads={len(sil.i2c_reads_of(REG_RESULT_DISTANCE))}"))
-    chain.append((f"a CAN frame with the reading appeared at 0x{FRONT_CAN_ID:03X}",
-                  len(sil.bus.delivered) > frames_before,
-                  f"frames delivered={len(sil.bus.delivered) - frames_before}"))
+    ranging_write_count = sum(
+        1 for e in sil.i2c_writes_to(REG_SYSTEM_START)
+        if ('21' in e.split('bytes=[')[-1] or
+            '40' in e.split('bytes=[')[-1]))
+    distance_read_count = len(sil.i2c_reads_of(REG_RESULT_DISTANCE))
+    delivered_frame_count = len(sil.bus.delivered) - frames_before
+
+    sensor_began_ranging = sil.sensor.ranging or sil.sensor.completions > 0
+    measurement_completed = sil.sensor.completions > 0
+    data_ready_path_observed = sil.data_ready or distance_read_count > 0
+    loop_read_result = distance_read_count > 0
+    can_frame_with_reading_appeared = delivered_frame_count > 0
+
+    sensor_ranging_evidence = (
+        f"ranging={sil.sensor.ranging}, completions={sil.sensor.completions}, "
+        f"SYSTEM_START ranging writes={ranging_write_count}")
+    measurement_completion_evidence = f"completions={sil.sensor.completions}"
+    data_ready_evidence = f"data_ready={sil.data_ready}"
+    result_read_evidence = f"distance reads={distance_read_count}"
+    can_delivery_evidence = f"frames delivered={delivered_frame_count}"
+
+    chain: list[tuple[str, bool, str]] = [
+        ("sensor began ranging", sensor_began_ranging,
+         sensor_ranging_evidence),
+        ("a measurement completed", measurement_completed,
+         measurement_completion_evidence),
+        ("data_ready was raised", data_ready_path_observed,
+         data_ready_evidence),
+        ("the loop read the result", loop_read_result,
+         result_read_evidence),
+        (f"a CAN frame with the reading appeared at 0x{FRONT_CAN_ID:03X}",
+         can_frame_with_reading_appeared,
+         can_delivery_evidence),
+    ]
 
     first_break = next((name for name, ok, _ in chain if not ok), None)
     evidence = "; ".join(f"{name}: {info}" for name, _, info in chain)
@@ -1032,19 +1224,73 @@ def t_e2e_strict(rep: Report):
         "complete chain: sensor measurement -> CAN frame, firmware-driven",
         first_break is None,
         observed=f"chain broke at: '{first_break}'. Full chain state: {evidence}",
-        expected="every link present with no Python assistance",
-        note="contract source: the '//send data along CAN' comment in "
-             "get_data_it() and the unused-in-main sensor_start()/push_on_bus() "
-             "in BoardManager.c. Compare this with sys.e2e_component_assisted, "
-             "where Python starts the sensor by hand and the chain runs "
-             "until its next missing link.")
+        expected="every link present without component-level Python calls",
+        note="contract source: main.c's startup retry loops and the "
+             "'//send data along CAN' comment in get_data_it(). Compare "
+             "this with sys.e2e_component_assisted, where Python starts "
+             "the sensor by hand and the chain runs until its next "
+             "missing link.")
+
+
+@sil_test("sys.startup_mirror_drift",
+          "sil_shim.c's startup/loop mirror still matches main.c")
+def t_startup_mirror_drift(rep: Report):
+    """
+    main.c is not linked into the SIL DLL; sil_shim.c mirrors its startup
+    retry loops (sil_main_start) and its while(1) body (sil_main_step).
+    This test reads Core/Src/main.c TEXT and asserts the mirrored shapes
+    are still present, so the mirror cannot silently drift from the
+    production source again. It runs no firmware.
+    """
+    import os
+    import re
+    main_c = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                          "..", "Core", "Src", "main.c")
+    with open(main_c, encoding="utf-8", errors="replace") as f:
+        src = f.read()
+
+    can_loop = re.search(r"while\s*\(\s*!\s*initializeCAN\s*\(\s*\)\s*\)", src)
+    sensor_loop = re.search(r"while\s*\(\s*!\s*sensor_start\s*\(\s*\)\s*\)", src)
+    rep.check("main.c retries initializeCAN() in a loop",
+              can_loop is not None,
+              observed=(can_loop.group(0) if can_loop
+                        else "no 'while (!initializeCAN())' found"),
+              expected="a 'while (!initializeCAN())' retry loop")
+    rep.check("main.c retries sensor_start() in a loop",
+              sensor_loop is not None,
+              observed=(sensor_loop.group(0) if sensor_loop
+                        else "no 'while (!sensor_start())' found"),
+              expected="a 'while (!sensor_start())' retry loop")
+    rep.check("initializeCAN() retry precedes the sensor_start() retry",
+              bool(can_loop and sensor_loop and
+                   can_loop.start() < sensor_loop.start()),
+              observed=(f"initializeCAN loop at offset "
+                        f"{can_loop.start() if can_loop else 'n/a'}, "
+                        f"sensor_start loop at offset "
+                        f"{sensor_loop.start() if sensor_loop else 'n/a'}"),
+              expected="CAN bring-up first, then the sensor "
+                       "(the order sil_main_start mirrors)")
+    dr_check = re.search(r"if\s*\(\s*data_ready\s*\)", src)
+    rep.check("the main loop consumes data_ready",
+              dr_check is not None,
+              observed=(dr_check.group(0) if dr_check
+                        else "no 'if (data_ready)' found"),
+              expected="an 'if (data_ready)' guard "
+                       "(the shape sil_main_step mirrors)")
+    rep.check("the main loop calls get_data_it()",
+              re.search(r"get_data_it\s*\(\s*\)", src) is not None,
+              observed="get_data_it() call found" if
+                       re.search(r"get_data_it\s*\(\s*\)", src)
+                       else "no get_data_it() call found",
+              expected="a get_data_it() call in the loop body")
 
 
 # ======================================================================
 # scn.* -- scenario tests (realistic multi-step situations)
 # ======================================================================
 
-@sil_test("scn.normal_100_cycles", "100 measurement cycles without a reset")
+@sil_test("scn.normal_100_cycles",
+          "100 complete and correctly decoded measurement cycles")
 def t_scn_100_cycles(rep: Report):
     sil = Sil(accept_raw_devaddr=ACCOMMODATED, exti_force_fire=True)
     d = sil.dll
@@ -1076,21 +1322,62 @@ def t_scn_100_cycles(rep: Report):
               observed=f"{len(sil.i2c_writes_to(REG_SYSTEM_INTERRUPT_CLEAR))} "
                        "clear writes",
               expected=">= 100")
-    rep.observe("decoded values over the run",
-                f"{mismatches}/100 decoded distances differed from the "
-                "measured distance (value decoding has its own test: "
-                "i2c.get_result_roundtrip)")
+    rep.check("all 100 decoded distances match the programmed measurements",
+              mismatches == 0,
+              observed=f"{mismatches}/100 decoded distances differed",
+              expected="0/100 mismatches",
+              note="this scenario judges both handshake endurance and value "
+                   "integrity; i2c.get_result_roundtrip provides the focused "
+                   "single-measurement diagnosis")
 
 
 @sil_test("scn.sensor_absent_boot", "sensor missing from the bus at power-up")
 def t_scn_sensor_absent(rep: Report):
-    sil = Sil()          # STRICT addressing: nothing answers the driver
-    ok = sil.dll.sensor_start()
+    sil = Sil(sensor_present=False)
+    # Model self-check at the correct STM32 HAL-form address: the NACK is due
+    # to physical absence, not the firmware's separate address convention.
+    value = ct.c_uint8(0)
+    correct_hal_address = sil.sensor.DEVICE_7BIT << 1
+    probe_status = sil.dll.VL53L4CD_RdByte(
+        correct_hal_address, REG_IDENTIFICATION_MODEL_ID, ct.byref(value))
+    rep.check(
+        "absence model NACKs even the correct HAL-form sensor address",
+        not sil.sensor.present and probe_status != 0,
+        observed=(f"sensor_present={sil.sensor.present}; DevAddress="
+                  f"0x{correct_hal_address:02X} returned {probe_status}; "
+                  "trace reason is 'sensor physically absent'"),
+        expected=("sensor_present=False and a nonzero status at DevAddress="
+                  f"0x{correct_hal_address:02X}"))
+    ready = sil.dll.HAL_I2C_IsDeviceReady(None, correct_hal_address, 3, 100)
+    rep.check(
+        "a readiness probe NACKs when the sensor is absent",
+        ready != 0,
+        observed=f"HAL_I2C_IsDeviceReady returned {ready}",
+        expected="nonzero (HAL_ERROR)")
+    ready_many = sil.dll.HAL_I2C_IsDeviceReady(
+        None, correct_hal_address, 250, 100)
+    rep.check(
+        "more trials never turn an absent sensor into a present one",
+        ready_many != 0,
+        observed=f"250 trials returned {ready_many}; "
+                 f"{sil.sensor.ready_probes} probe(s) simulated so far",
+        expected="nonzero (HAL_ERROR)")
+    start_exception = ""
+    try:
+        ok = sil.dll.sensor_start()
+    except OSError as exc:
+        # ctypes turns a host divide-by-zero/access violation into OSError on
+        # Windows. Keep it as contract evidence instead of losing the checks
+        # already collected to a worker-level ERROR.
+        ok = None
+        start_exception = str(exc)
     rep.check(
         "sensor_start() fails cleanly with no sensor on the bus",
-        bool(ok) is False,
-        observed=f"every transaction NACKed; sensor_start() returned {bool(ok)}",
-        expected="False")
+        ok is not None and bool(ok) is False,
+        observed=("transactions NACKed because the model is explicitly "
+                  f"absent; sensor_start() "
+                  f"{'raised ' + start_exception if start_exception else 'returned ' + str(bool(ok))}"),
+        expected="returns False without a host exception")
     rep.check("no ranging state was entered",
               not sil.sensor.ranging,
               observed=f"ranging={sil.sensor.ranging}", expected="False")
@@ -1100,6 +1387,86 @@ def t_scn_sensor_absent(rep: Report):
     rep.check("nothing was sent on CAN",
               len(sil.bus.delivered) == 0,
               observed=f"{len(sil.bus.delivered)} frame(s)", expected="0")
+    rep.observe(
+        "absent-sensor I2C evidence",
+        f"{sil.sensor.transactions} register transaction(s), "
+        f"{sil.sensor.nack_count} NACK(s) total; first register touched: "
+        f"{sil.sensor.first_reg}; last: {sil.sensor.last_reg}; host "
+        f"exception during sensor_start(): "
+        f"{start_exception if start_exception else 'none'}; "
+        f"ranging started: {sil.sensor.ranging}",
+        note="the storm size shows how much traffic the driver generates "
+             "with no device answering, and where in the init flow the host "
+             "fault (if any) occurred -- the values feeding the failing "
+             "arithmetic all came from calls that had already reported "
+             "failure")
+
+
+@sil_test("sys.failed_get_result_not_consumed",
+          "a failed GetResult is not presented or transmitted as valid data")
+def t_failed_get_result_not_consumed(rep: Report):
+    """Use a valid control cycle, then fault only the distance read."""
+    sil = Sil(accept_raw_devaddr=ACCOMMODATED, exti_force_fire=True)
+    d = sil.dll
+    d.MX_GPIO_Init()
+    d.initializeCAN()
+    d.sensor_start()
+
+    # Control: prove this path and stdout capture can expose a valid sample.
+    sil.sensor.program_measurement(distance_mm=222, user_status=0)
+    sil.sensor.complete_measurement()
+    d.sil_main_step()
+    control_output = _captured_firmware_stdout(sil)
+    control_lines = [line for line in control_output.splitlines()
+                     if "Distance:" in line]
+    control_frames = len(sil.bus.delivered)
+    rep.check(
+        "valid control sample reaches the application's valid-data output",
+        bool(control_lines),
+        observed=(control_lines[-1] if control_lines else
+                  f"no Distance line; captured={control_output!r}"),
+        expected="a Distance line from the valid control cycle")
+
+    # Fault only the final result field. Earlier fields, including the valid
+    # range status, read normally; this deterministically exposes code that
+    # ignores GetResult's returned error and consumes a partial result.
+    sil.sensor.program_measurement(distance_mm=777, user_status=0)
+    sil.sensor.complete_measurement()
+    sil.data.range_status = 0xFE
+    sil.data.distance_mm = 0xA55A
+    sil.sensor.add_fault(REG_RESULT_DISTANCE, op="read",
+                         status=HAL_TIMEOUT, times=1)
+    before_fault_output = _captured_firmware_stdout(sil)
+    frames_before_fault = len(sil.bus.delivered)
+    d.sil_main_step()
+    after_fault_output = _captured_firmware_stdout(sil)
+    fault_output = after_fault_output[len(before_fault_output):]
+    fault_hits = sil.log.find("injected fault")
+
+    rep.check(
+        "the intended GetResult distance-read fault occurred",
+        bool(fault_hits) and "RESULT__DISTANCE" in fault_hits[-1],
+        observed=fault_hits[-1] if fault_hits else "no injected-fault event",
+        expected="one HAL_TIMEOUT on RESULT__DISTANCE")
+    rep.check(
+        "failed result is not presented as a valid measurement",
+        "Distance:" not in fault_output,
+        observed=(f"new firmware output after the timeout: {fault_output!r}; "
+                  f"data.range_status={sil.data.range_status}, "
+                  f"data.distance_mm={sil.data.distance_mm}"),
+        expected="no Distance line for a GetResult call that returned failure",
+        note="the valid control above makes this a success/failure distinction, "
+             "not a vacuous no-output check")
+    rep.check(
+        "failed result is not transmitted on CAN",
+        len(sil.bus.delivered) == frames_before_fault,
+        observed=(f"failed-cycle CAN frames="
+                  f"{len(sil.bus.delivered) - frames_before_fault}; valid "
+                  f"control frames={control_frames}"),
+        expected="0 failed-cycle frames",
+        note="this check is necessary but not sufficient while the valid path "
+             "also emits no CAN frame; the required output-distinction check "
+             "above prevents a vacuous overall PASS")
 
 
 @sil_test("scn.transient_i2c_fault_recovery",

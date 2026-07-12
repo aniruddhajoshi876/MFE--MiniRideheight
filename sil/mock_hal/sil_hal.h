@@ -51,6 +51,8 @@ HAL_StatusTypeDef HAL_I2C_Mem_Read(I2C_HandleTypeDef *hi2c, uint16_t DevAddress,
 HAL_StatusTypeDef HAL_I2C_Mem_Write(I2C_HandleTypeDef *hi2c, uint16_t DevAddress,
                                     uint16_t MemAddress, uint16_t MemAddSize,
                                     uint8_t *pData, uint16_t Size, uint32_t Timeout);
+HAL_StatusTypeDef HAL_I2C_IsDeviceReady(I2C_HandleTypeDef *hi2c, uint16_t DevAddress,
+                                        uint32_t Trials, uint32_t Timeout);
 
 void MX_I2C2_Init(void);
 
@@ -212,6 +214,9 @@ void MX_FDCAN1_Init(void);
 typedef int32_t (*sil_i2c_cb_t)(uint16_t dev_address, uint16_t mem_address,
                                 uint16_t mem_add_size, uint8_t *buf,
                                 uint16_t len, int32_t is_write);
+/* address-only readiness probe; return value is a HAL_StatusTypeDef */
+typedef int32_t (*sil_i2c_ready_cb_t)(uint16_t dev_address, uint32_t trials,
+                                      uint32_t timeout_ms);
 typedef void    (*sil_delay_cb_t)(uint32_t ms);
 typedef void    (*sil_gpio_init_cb_t)(uint32_t port_id, uint32_t pin,
                                       uint32_t mode, uint32_t pull);
@@ -228,6 +233,7 @@ typedef void    (*sil_fdcan_protocol_cb_t)(uint32_t *last_error_code,
 typedef void    (*sil_fdcan_counters_cb_t)(uint32_t *tx_error_cnt);
 
 void sil_set_i2c_cb(sil_i2c_cb_t cb);
+void sil_set_i2c_ready_cb(sil_i2c_ready_cb_t cb);
 void sil_set_delay_cb(sil_delay_cb_t cb);
 void sil_set_gpio_init_cb(sil_gpio_init_cb_t cb);
 void sil_set_fdcan_add_cb(sil_fdcan_add_cb_t cb);

@@ -27,16 +27,20 @@ bool push_on_bus(uint16_t payload){
 
 bool sensor_start(){
 	  if (VL53L4CD_SensorInit(DEVICE_INSTANCE)) {return false;}; //initialize sensor
-	  if (VL53L4CD_StartRanging(DEVICE_INSTANCE)) {return true;} //begin reading distance
+	  if (VL53L4CD_StartRanging(DEVICE_INSTANCE)) {return false;} //begin reading distance
 	  return true;
 }
 
 void get_data_it(){
-	  VL53L4CD_GetResult(DEVICE_INSTANCE, &data); //get data
+	  if (VL53L4CD_GetResult(DEVICE_INSTANCE, &data)) {//get data
+		  VL53L4CD_ClearInterrupt(DEVICE_INSTANCE); //clear interrupt
+		  return;
+	  }
 	  VL53L4CD_ClearInterrupt(DEVICE_INSTANCE); //clear interrupt
 	  if (data.range_status == 0){
+		  push_on_bus(data.distance_mm); //send data along CAN
 		  printf("Distance: %d (mm)\r\n", data.distance_mm); //print data to terminal
-		  //send data along CAN
+
 	  } else{
 		  printf("Measurement Error\r\n");
 	  }

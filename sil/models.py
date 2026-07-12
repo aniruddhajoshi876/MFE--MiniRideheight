@@ -17,6 +17,7 @@ All activity lands in a shared TransactionLog used as failure evidence.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import re
 
 # ---- HAL status codes (mirrors sil_hal.h) ----
 HAL_OK, HAL_ERROR, HAL_BUSY, HAL_TIMEOUT = 0, 1, 2, 3
@@ -84,6 +85,65 @@ class TransactionLog:
     def find(self, needle: str) -> list[str]:
         return [e for e in self.entries if needle in e]
 
+    def export(self, max_lines: int = 300) -> tuple[list[str], dict]:
+        """Return bounded evidence without bounding the live test log.
+
+        Consecutive identical event bodies are represented by one summary
+        line.  If the collapsed stream is still large, a head and tail are
+        retained with an explicit omission marker.  Counts describe raw
+        simulated events rather than stored strings, so truncation is never
+        silent and tests remain free to inspect every live entry.
+        """
+        if max_lines < 3:
+            raise ValueError("max_lines must leave room for head/tail evidence")
+
+        runs: list[tuple[int, int, str]] = []
+        for index, entry in enumerate(self.entries):
+            body = re.sub(r"^\[\d+\]\s+", "", entry)
+            if runs and runs[-1][2] == body:
+                start, _, same = runs[-1]
+                runs[-1] = (start, index, same)
+            else:
+                runs.append((index, index, body))
+
+        def render(run: tuple[int, int, str]) -> str:
+            start, end, body = run
+            if start == end:
+                return self.entries[start]
+            count = end - start + 1
+            return (f"[{start:04d}..{end:04d}] {body} "
+                    f"(repeated {count} times)")
+
+        truncated = len(runs) > max_lines
+        if truncated:
+            head_count = max_lines * 2 // 5
+            tail_count = max_lines - head_count - 1
+            selected = runs[:head_count] + runs[-tail_count:]
+            omitted_runs = runs[head_count:len(runs) - tail_count]
+            omitted_events = sum(end - start + 1
+                                 for start, end, _ in omitted_runs)
+            lines = [render(run) for run in runs[:head_count]]
+            lines.append(
+                f"[trace] omitted {omitted_events} raw event(s) across "
+                f"{len(omitted_runs)} collapsed run(s); head/tail retained")
+            lines.extend(render(run) for run in runs[-tail_count:])
+        else:
+            selected = runs
+            omitted_events = 0
+            lines = [render(run) for run in runs]
+
+        captured_events = sum(end - start + 1 for start, end, _ in selected)
+        stats = {
+            "total_events": len(self.entries),
+            "captured_events": captured_events,
+            "omitted_events": omitted_events,
+            "stored_lines": len(lines),
+            "collapsed_runs": len(runs),
+            "repeated_events_collapsed": len(self.entries) - len(runs),
+            "truncated": truncated,
+        }
+        return lines, stats
+
 
 class SimClock:
     """Simulated milliseconds. HAL_Delay advances it; nothing else does."""
@@ -148,10 +208,15 @@ class VL53Model:
 
     def __init__(self, clock: SimClock, log: TransactionLog,
                  accept_raw_devaddr: set[int] | None = None,
-                 boot_forever: bool = False) -> None:
+                 boot_forever: bool = False,
+                 sensor_present: bool = True) -> None:
         self.clock = clock
         self.log = log
+        self.present = sensor_present
         self.boot_forever = boot_forever
+        if not sensor_present:
+            log.add("note", "scenario: sensor is physically absent; no I2C "
+                            "address will be acknowledged")
         if boot_forever:
             log.add("note", "scenario: sensor never leaves boot state "
                             "(FIRMWARE__SYSTEM_STATUS stays 0x02)")
@@ -169,6 +234,12 @@ class VL53Model:
         self.faults: list[Fault] = []
         self.devaddr_args_seen: set[int] = set()
         self.nacked_args: set[int] = set()
+        # evidence counters (absent-sensor NACK storms etc.)
+        self.transactions = 0
+        self.nack_count = 0
+        self.first_reg: str | None = None
+        self.last_reg: str | None = None
+        self.ready_probes = 0
 
         # --- power-on defaults ---
         self._store(REG_IDENTIFICATION_MODEL_ID, 0xEBAA, 2)  # model id 0xEBAA
@@ -240,7 +311,11 @@ class VL53Model:
     # ---------------- time-driven completion ----------------
 
     def _on_time(self, now: int) -> None:
-        if self.boot_forever:
+        if not self.present:
+            # There is no device whose internal boot state can transition.
+            # In particular, an absent-sensor trace must never claim boot.
+            pass
+        elif self.boot_forever:
             pass
         elif self.boot_deadline is not None and now >= self.boot_deadline:
             self.regs[REG_FIRMWARE_SYSTEM_STATUS] = 0x03
@@ -301,15 +376,25 @@ class VL53Model:
             data: list[int] | None) -> tuple[int, list[int] | None]:
         """Returns (hal_status, read_bytes_or_None)."""
         self.devaddr_args_seen.add(dev_addr)
+        self.transactions += 1
+        if self.first_reg is None:
+            self.first_reg = reg_name(reg)
+        self.last_reg = reg_name(reg)
 
         wire7 = (dev_addr >> 1) & 0x7F
-        acknowledged = (wire7 == self.DEVICE_7BIT) or (dev_addr in self.accept_raw)
+        acknowledged = self.present and (
+            (wire7 == self.DEVICE_7BIT) or (dev_addr in self.accept_raw))
         rw = "WR" if is_write else "RD"
         if not acknowledged:
             self.nacked_args.add(dev_addr)
+            self.nack_count += 1
+            if not self.present:
+                reason = "sensor physically absent; no address is acknowledged"
+            else:
+                reason = f"device 7-bit is 0x{self.DEVICE_7BIT:02X}"
             self.log.add("i2c", f"{rw} {reg_name(reg)} len={length} "
-                                f"DevAddress=0x{dev_addr:02X} (wire 7-bit 0x{wire7:02X}) "
-                                f"-> NACK (device 7-bit is 0x{self.DEVICE_7BIT:02X})")
+                                f"DevAddress=0x{dev_addr:02X} "
+                                f"(wire 7-bit 0x{wire7:02X}) -> NACK ({reason})")
             return HAL_ERROR, None
 
         for f in self.faults:
@@ -338,6 +423,45 @@ class VL53Model:
         self.log.add("i2c", f"RD {reg_name(reg)} len={length} "
                             f"bytes=[{' '.join(f'{b:02X}' for b in out)}]")
         return HAL_OK, out
+
+    def is_device_ready(self, dev_addr: int, trials: int,
+                        timeout_ms: int) -> int:
+        """Model of HAL_I2C_IsDeviceReady: an address-only probe.
+
+        The device ACKs under exactly the same conditions as a register
+        transaction (present AND correctly-addressed). A present device
+        answers the first probe; an absent or mis-addressed one NACKs all
+        `trials` probes. Injected faults with op="ready" simulate a device
+        that is powered but not yet responsive.
+        """
+        self.devaddr_args_seen.add(dev_addr)
+        wire7 = (dev_addr >> 1) & 0x7F
+        for f in self.faults:
+            if f.op == "ready" and f.remaining != 0:
+                st = f.consume()
+                self.ready_probes += max(1, trials)
+                self.log.add("i2c", f"READY probe DevAddress=0x{dev_addr:02X} "
+                                    f"trials={trials} timeout={timeout_ms}ms "
+                                    f"-> injected fault, HAL status {st}")
+                return st
+        acknowledged = self.present and (
+            (wire7 == self.DEVICE_7BIT) or (dev_addr in self.accept_raw))
+        probes = 1 if acknowledged else max(1, trials)
+        self.ready_probes += probes
+        if acknowledged:
+            self.log.add("i2c", f"READY probe DevAddress=0x{dev_addr:02X} "
+                                f"(wire 7-bit 0x{wire7:02X}) trials={trials} "
+                                f"timeout={timeout_ms}ms -> ACK on probe 1")
+            return HAL_OK
+        self.nacked_args.add(dev_addr)
+        self.nack_count += probes
+        reason = ("sensor physically absent" if not self.present
+                  else f"device 7-bit is 0x{self.DEVICE_7BIT:02X}")
+        self.log.add("i2c", f"READY probe DevAddress=0x{dev_addr:02X} "
+                            f"(wire 7-bit 0x{wire7:02X}) trials={trials} "
+                            f"timeout={timeout_ms}ms -> NACK on all "
+                            f"{probes} probe(s) ({reason})")
+        return HAL_ERROR
 
     def _write_side_effects(self, reg: int, data: list[int]) -> None:
         span = range(reg, reg + len(data))
@@ -510,11 +634,16 @@ class GpioExtiModel:
         self.configs: list[dict] = []
         self.force_fire = force_fire
         self.fire_exti = lambda pin: None       # set by harness
+        # GPIO1 level that means "interrupt asserted"; the harness wires this
+        # to the sensor model's polarity (open-drain idle-high -> default 0).
+        self.asserted_level = lambda: 0
         self.exti_fired = 0
         self.accommodations: list[str] = []
         if force_fire:
-            note = ("SIL accommodation: EXTI4 fires on ANY PA4 level transition, "
-                    "bypassing the configured-edge check (which has its own test)")
+            note = ("SIL accommodation: the sensor ASSERTION transition fires "
+                    "EXTI4 even when it does not match the captured MCU edge; "
+                    "the release/clear transition never force-fires "
+                    "(the configured-edge contract has its own strict test)")
             self.accommodations.append(note)
             log.add("note", note)
 
@@ -554,7 +683,11 @@ class GpioExtiModel:
         matches = bool(mode & self.EXTI_IT_BIT) and (
             (rising and (mode & self.TRIGGER_RISING_BIT)) or
             (falling and (mode & self.TRIGGER_FALLING_BIT)))
-        if matches or (self.force_fire and (rising or falling)):
+        # The accommodation may only substitute for a wrong configured edge on
+        # the ASSERTING transition; a release (clear) must never fire EXTI,
+        # because no real edge-triggered EXTI would see it as a second event.
+        force_applies = self.force_fire and new == self.asserted_level()
+        if matches or force_applies:
             forced = "" if matches else " [forced by SIL accommodation]"
             self.exti_fired += 1
             self.log.add("gpio", f"PA4 transition {old}->{new} -> EXTI4 fired{forced}")
